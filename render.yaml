@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: hr-feedback-api
+    env: python
+    rootDir: server
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: STORAGE_BACKEND
+        value: google_sheets
+      - key: HR_SUMMARY_SHEET
+        value: Sheet1
+      - key: GOOGLE_SHEETS_SPREADSHEET_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false

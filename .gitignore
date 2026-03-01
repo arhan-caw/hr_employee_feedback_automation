@@ -1,3 +1,5 @@
 memo/
 # Local Codex skills (keep out of VCS)
 .codex/skills/
+*.service-account.json
+service-account.json
