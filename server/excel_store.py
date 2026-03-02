@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ class SubmissionRecord:
 class ExcelFeedbackStore:
     FEEDBACK_SHEET = "feedback"
     SUMMARY_VIEW_SHEET = "Sheet1"
+    QUEUE_SHEET = "ingestion_queue"
 
     HEADER = [
         "record_type",  # submission | summary
@@ -67,6 +69,16 @@ class ExcelFeedbackStore:
         "Client Difference >0.5",
         "Manager Difference >0.5",
     ]
+    QUEUE_HEADER = [
+        "event_id",
+        "status",
+        "attempt_count",
+        "next_retry_at",
+        "created_at",
+        "updated_at",
+        "last_error",
+        "payload_json",
+    ]
 
     def __init__(self, workbook_path: str, summary_view_sheet: str = SUMMARY_VIEW_SHEET) -> None:
         self.path = Path(workbook_path)
@@ -91,6 +103,7 @@ class ExcelFeedbackStore:
                     "Use a fresh workbook path or migrate existing sheet."
                 )
             self._ensure_summary_view_sheet(wb)
+            self._ensure_queue_sheet(wb)
             wb.save(self.path)
             return
 
@@ -99,6 +112,7 @@ class ExcelFeedbackStore:
         ws.title = self.FEEDBACK_SHEET
         ws.append(self.HEADER)
         wb.create_sheet(self.summary_view_sheet).append(self.SUMMARY_VIEW_HEADER)
+        wb.create_sheet(self.QUEUE_SHEET).append(self.QUEUE_HEADER)
         wb.save(self.path)
 
     def _normalize_headers(self, headers: List[str | None]) -> List[str]:
@@ -116,6 +130,94 @@ class ExcelFeedbackStore:
                 f"Summary sheet '{self.summary_view_sheet}' header mismatch. "
                 "Please align the first 15 columns with the expected HR table."
             )
+
+    def _ensure_queue_sheet(self, wb) -> None:
+        if self.QUEUE_SHEET not in wb.sheetnames:
+            wb.create_sheet(self.QUEUE_SHEET).append(self.QUEUE_HEADER)
+            return
+        ws = wb[self.QUEUE_SHEET]
+        existing = [ws.cell(row=1, column=c).value for c in range(1, len(self.QUEUE_HEADER) + 1)]
+        if self._normalize_headers(existing) != self._normalize_headers(self.QUEUE_HEADER):
+            raise ValueError("Queue sheet header mismatch")
+
+    def enqueue_event(self, payload: dict, created_at: str) -> str:
+        event_id = str(uuid.uuid4())
+        with self._lock:
+            wb = load_workbook(self.path)
+            ws = wb[self.QUEUE_SHEET]
+            ws.append([event_id, "pending", 0, "", created_at, created_at, "", json.dumps(payload)])
+            wb.save(self.path)
+        return event_id
+
+    def claim_due_events(self, now_iso_value: str, limit: int = 20) -> List[dict]:
+        claimed: List[dict] = []
+        with self._lock:
+            wb = load_workbook(self.path)
+            ws = wb[self.QUEUE_SHEET]
+            for row_idx in range(2, ws.max_row + 1):
+                if len(claimed) >= limit:
+                    break
+                status = str(ws.cell(row=row_idx, column=2).value or "").strip().lower()
+                next_retry_at = str(ws.cell(row=row_idx, column=4).value or "").strip()
+                if status not in {"pending", "retry"}:
+                    continue
+                if next_retry_at and next_retry_at > now_iso_value:
+                    continue
+                attempt_count = int(ws.cell(row=row_idx, column=3).value or 0) + 1
+                ws.cell(row=row_idx, column=2, value="processing")
+                ws.cell(row=row_idx, column=3, value=attempt_count)
+                ws.cell(row=row_idx, column=6, value=now_iso_value)
+                raw_payload = str(ws.cell(row=row_idx, column=8).value or "{}")
+                payload = json.loads(raw_payload)
+                claimed.append(
+                    {
+                        "event_id": str(ws.cell(row=row_idx, column=1).value or "").strip(),
+                        "attempt_count": attempt_count,
+                        "payload": payload,
+                    }
+                )
+            wb.save(self.path)
+        return claimed
+
+    def mark_event_processed(self, event_id: str, now_iso_value: str) -> None:
+        self._update_event_status(event_id, "processed", now_iso_value, "", "")
+
+    def mark_event_retry(self, event_id: str, now_iso_value: str, next_retry_at: str, error: str) -> None:
+        self._update_event_status(event_id, "retry", now_iso_value, next_retry_at, error)
+
+    def mark_event_failed(self, event_id: str, now_iso_value: str, error: str) -> None:
+        self._update_event_status(event_id, "failed", now_iso_value, "", error)
+
+    def _update_event_status(
+        self, event_id: str, status: str, now_iso_value: str, next_retry_at: str, error: str
+    ) -> None:
+        with self._lock:
+            wb = load_workbook(self.path)
+            ws = wb[self.QUEUE_SHEET]
+            for row_idx in range(2, ws.max_row + 1):
+                row_event = str(ws.cell(row=row_idx, column=1).value or "").strip()
+                if row_event != event_id:
+                    continue
+                ws.cell(row=row_idx, column=2, value=status)
+                ws.cell(row=row_idx, column=4, value=next_retry_at)
+                ws.cell(row=row_idx, column=6, value=now_iso_value)
+                ws.cell(row=row_idx, column=7, value=(error or "")[:1000])
+                break
+            wb.save(self.path)
+
+    def get_queue_stats(self) -> dict:
+        stats = {"pending": 0, "processing": 0, "processed": 0, "retry": 0, "failed": 0, "total": 0}
+        with self._lock:
+            wb = load_workbook(self.path, read_only=True)
+            ws = wb[self.QUEUE_SHEET]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not row or len(row) < 2:
+                    continue
+                status = str(row[1] or "").strip().lower()
+                if status in stats:
+                    stats[status] += 1
+                stats["total"] += 1
+        return stats
 
     def append_submission(self, record: SubmissionRecord) -> None:
         with self._lock:

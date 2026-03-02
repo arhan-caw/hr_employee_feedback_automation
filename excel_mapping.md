@@ -6,6 +6,7 @@ Keep HR-style single table view in `Sheet1`, while preserving reliable raw inges
 ## Worksheets
 - `Sheet1` (or `HR_SUMMARY_SHEET`): HR-facing top table plus existing KPI blocks below.
 - `feedback`: internal rows used by API for raw submissions and summary snapshots.
+- `ingestion_queue`: durable event queue with status (`pending/processing/processed/retry/failed`).
 
 ## `feedback` Columns
 1. `record_type` (`submission` | `summary`)

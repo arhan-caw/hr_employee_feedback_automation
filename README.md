@@ -66,6 +66,21 @@ See `excel_mapping.md` for exact columns and payload mapping.
 - Backward-compatible fallback: `employee_id`
 - Existing routes keep `/employees/{employee_id}/...` for compatibility, but you can pass email in that path (for example `/employees/alex@caw.tech/quarters/2026/Q1`).
 
+## Reliability (Queue First)
+- `/feedback` now uses enqueue-first processing.
+- Every submission is captured in `ingestion_queue` before processing.
+- If inline processing fails, event is marked `retry` and can be retried via `/queue/process`.
+- This reduces the risk of dropped submissions during transient failures.
+
+### Queue endpoint
+- `POST /queue/process`
+```json
+{
+  "limit": 20,
+  "max_attempts": 10
+}
+```
+
 ### Quick start for weekend testing (no GCP billing needed)
 - Set `STORAGE_BACKEND=local_excel`
 - Run API and test flows against local file (default: `server/data/feedback_store.xlsx`)

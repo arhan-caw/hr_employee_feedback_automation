@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Dict, List, Literal
 
@@ -107,6 +107,11 @@ class QuarterSummary(BaseModel):
     negative_summary: List[str]
 
 
+class QueueProcessRequest(BaseModel):
+    limit: int = Field(default=20, ge=1, le=200)
+    max_attempts: int = Field(default=10, ge=1, le=50)
+
+
 def _difference_fields(averages: Dict[str, float]) -> Dict[str, float | str]:
     self_avg = averages.get("self")
     client_avg = averages.get("client")
@@ -131,6 +136,12 @@ def _normalize_employee_key(employee_id: str | None, employee_email: str | None)
     if employee_id and employee_id.strip():
         return employee_id.strip()
     raise HTTPException(status_code=400, detail="Either employee_email or employee_id is required")
+
+
+def _retry_time_iso(attempt_count: int) -> str:
+    # Exponential backoff capped to 1 hour.
+    delay_seconds = min(60 * (2 ** max(attempt_count - 1, 0)), 3600)
+    return (datetime.utcnow() + timedelta(seconds=delay_seconds)).replace(microsecond=0).isoformat() + "Z"
 
 
 def _quarter_summary(employee_key: str, year: int, quarter: str) -> QuarterSummary:
@@ -172,8 +183,7 @@ def health_check() -> dict:
     return {"status": "ok", **STORE_INFO}
 
 
-@app.post("/feedback")
-def submit_feedback(payload: FeedbackSubmission) -> dict:
+def _process_feedback_payload(payload: FeedbackSubmission) -> dict:
     employee_key = _normalize_employee_key(payload.employee_id, payload.employee_email)
     key = submission_key(payload.year, payload.quarter)
     record = SubmissionRecord(
@@ -219,13 +229,83 @@ def submit_feedback(payload: FeedbackSubmission) -> dict:
             raise
 
     return {
-        "status": "recorded",
+        "status": "processed",
         "employee_id": employee_key,
         "employee_email": employee_key if "@" in employee_key else None,
         "key": key,
         "form_type": payload.form_type,
         "summary_status": summary_status,
     }
+
+
+@app.post("/feedback")
+def submit_feedback(payload: FeedbackSubmission) -> dict:
+    now = now_iso()
+    event_payload = payload.model_dump()
+    event_id = store.enqueue_event(event_payload, now)
+
+    # Try inline processing first for low latency; queue ensures durability on failure.
+    try:
+        result = _process_feedback_payload(payload)
+        store.mark_event_processed(event_id, now_iso())
+        return {
+            "status": "recorded",
+            "event_id": event_id,
+            "queue_status": "processed",
+            **{k: v for k, v in result.items() if k != "status"},
+        }
+    except Exception as exc:
+        store.mark_event_retry(event_id, now_iso(), _retry_time_iso(1), str(exc))
+        return {
+            "status": "recorded",
+            "event_id": event_id,
+            "queue_status": "retry_scheduled",
+            "message": "Submission captured in queue and will be retried.",
+        }
+
+
+@app.post("/queue/process")
+def process_queue(payload: QueueProcessRequest) -> dict:
+    now = now_iso()
+    events = store.claim_due_events(now, payload.limit)
+    processed = 0
+    retried = 0
+    failed = 0
+    details: List[dict] = []
+
+    for event in events:
+        event_id = event["event_id"]
+        attempt_count = int(event.get("attempt_count", 1))
+        try:
+            feedback_payload = FeedbackSubmission(**event["payload"])
+            result = _process_feedback_payload(feedback_payload)
+            store.mark_event_processed(event_id, now_iso())
+            processed += 1
+            details.append({"event_id": event_id, "status": "processed", "summary_status": result["summary_status"]})
+        except Exception as exc:
+            if attempt_count >= payload.max_attempts:
+                store.mark_event_failed(event_id, now_iso(), str(exc))
+                failed += 1
+                details.append({"event_id": event_id, "status": "failed"})
+            else:
+                store.mark_event_retry(event_id, now_iso(), _retry_time_iso(attempt_count), str(exc))
+                retried += 1
+                details.append({"event_id": event_id, "status": "retry"})
+
+    return {
+        "claimed": len(events),
+        "processed": processed,
+        "retried": retried,
+        "failed": failed,
+        "details": details,
+    }
+
+
+@app.get("/queue/stats")
+def queue_stats() -> dict:
+    if not hasattr(store, "get_queue_stats"):
+        raise HTTPException(status_code=501, detail="Queue stats not supported by current storage backend")
+    return store.get_queue_stats()
 
 
 @app.get("/employees/{employee_id}/quarters/{year}/{quarter}", response_model=QuarterSummary)

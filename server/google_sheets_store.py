@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
@@ -27,6 +28,7 @@ class SubmissionRecord:
 class GoogleSheetsFeedbackStore:
     FEEDBACK_SHEET = "feedback"
     SUMMARY_VIEW_SHEET = "Sheet1"
+    QUEUE_SHEET = "ingestion_queue"
     SCOPES = ("https://www.googleapis.com/auth/spreadsheets",)
 
     HEADER = [
@@ -70,6 +72,16 @@ class GoogleSheetsFeedbackStore:
         "Client Difference >0.5",
         "Manager Difference >0.5",
     ]
+    QUEUE_HEADER = [
+        "event_id",
+        "status",
+        "attempt_count",
+        "next_retry_at",
+        "created_at",
+        "updated_at",
+        "last_error",
+        "payload_json",
+    ]
 
     def __init__(
         self,
@@ -87,6 +99,7 @@ class GoogleSheetsFeedbackStore:
         self._summary_view_ws = self._ensure_worksheet(
             self.summary_view_sheet, self.SUMMARY_VIEW_HEADER, rows=3000, cols=20
         )
+        self._queue_ws = self._ensure_worksheet(self.QUEUE_SHEET, self.QUEUE_HEADER, rows=5000, cols=12)
 
     def _build_credentials(
         self, service_account_file: str | None, service_account_json: str | None
@@ -151,6 +164,78 @@ class GoogleSheetsFeedbackStore:
                 ],
                 value_input_option="RAW",
             )
+
+    def enqueue_event(self, payload: dict, created_at: str) -> str:
+        event_id = str(uuid.uuid4())
+        with self._lock:
+            self._queue_ws.append_row(
+                [event_id, "pending", "0", "", created_at, created_at, "", json.dumps(payload)],
+                value_input_option="RAW",
+            )
+        return event_id
+
+    def claim_due_events(self, now_iso_value: str, limit: int = 20) -> List[dict]:
+        claimed: List[dict] = []
+        with self._lock:
+            rows = self._queue_ws.get_all_values()
+            for idx, row in enumerate(rows[1:], start=2):
+                if len(claimed) >= limit:
+                    break
+                if len(row) < 8:
+                    continue
+                status = row[1].strip().lower()
+                next_retry_at = row[3].strip()
+                if status not in {"pending", "retry"}:
+                    continue
+                if next_retry_at and next_retry_at > now_iso_value:
+                    continue
+                attempt_count = int(row[2] or "0") + 1
+                self._queue_ws.update(
+                    f"B{idx}:F{idx}",
+                    [["processing", str(attempt_count), next_retry_at, row[4], now_iso_value]],
+                    value_input_option="RAW",
+                )
+                payload = json.loads(row[7] or "{}")
+                claimed.append({"event_id": row[0].strip(), "attempt_count": attempt_count, "payload": payload})
+        return claimed
+
+    def mark_event_processed(self, event_id: str, now_iso_value: str) -> None:
+        self._update_event_status(event_id, "processed", now_iso_value, "", "")
+
+    def mark_event_retry(self, event_id: str, now_iso_value: str, next_retry_at: str, error: str) -> None:
+        self._update_event_status(event_id, "retry", now_iso_value, next_retry_at, error)
+
+    def mark_event_failed(self, event_id: str, now_iso_value: str, error: str) -> None:
+        self._update_event_status(event_id, "failed", now_iso_value, "", error)
+
+    def _update_event_status(
+        self, event_id: str, status: str, now_iso_value: str, next_retry_at: str, error: str
+    ) -> None:
+        with self._lock:
+            rows = self._queue_ws.get_all_values()
+            for idx, row in enumerate(rows[1:], start=2):
+                if not row or row[0].strip() != event_id:
+                    continue
+                attempt_count = row[2] if len(row) > 2 else "0"
+                created_at = row[4] if len(row) > 4 else now_iso_value
+                self._queue_ws.update(
+                    f"B{idx}:G{idx}",
+                    [[status, attempt_count, next_retry_at, created_at, now_iso_value, (error or "")[:1000]]],
+                    value_input_option="RAW",
+                )
+                break
+
+    def get_queue_stats(self) -> dict:
+        stats = {"pending": 0, "processing": 0, "processed": 0, "retry": 0, "failed": 0, "total": 0}
+        rows = self._queue_ws.get_all_values()
+        for row in rows[1:]:
+            if len(row) < 2:
+                continue
+            status = row[1].strip().lower()
+            if status in stats:
+                stats[status] += 1
+            stats["total"] += 1
+        return stats
 
     def get_employee_name(self, employee_id: str) -> str | None:
         values = self._feedback_ws.get_all_values()
