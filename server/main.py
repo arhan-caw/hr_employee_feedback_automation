@@ -24,6 +24,13 @@ load_dotenv()
 FormType = Literal["self", "manager", "client", "peer"]
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local_excel").strip().lower()
 STORE_INFO: Dict[str, str] = {"storage": STORAGE_BACKEND}
+PROCESS_INLINE_ON_FEEDBACK = os.getenv("PROCESS_INLINE_ON_FEEDBACK", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "y",
+}
+STORE_INFO["process_inline_on_feedback"] = str(PROCESS_INLINE_ON_FEEDBACK).lower()
 
 if STORAGE_BACKEND == "google_sheets":
     from google_sheets_store import GoogleSheetsFeedbackStore, SubmissionRecord, now_iso
@@ -110,6 +117,10 @@ class QuarterSummary(BaseModel):
 class QueueProcessRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=200)
     max_attempts: int = Field(default=10, ge=1, le=50)
+
+
+class IngestRequest(FeedbackSubmission):
+    event_id: str | None = None
 
 
 def _difference_fields(averages: Dict[str, float]) -> Dict[str, float | str]:
@@ -242,7 +253,23 @@ def _process_feedback_payload(payload: FeedbackSubmission) -> dict:
 def submit_feedback(payload: FeedbackSubmission) -> dict:
     now = now_iso()
     event_payload = payload.model_dump()
-    event_id = store.enqueue_event(event_payload, now)
+    event_id, created = store.enqueue_event(event_payload, now)
+
+    if not created:
+        return {
+            "status": "recorded",
+            "event_id": event_id,
+            "queue_status": "duplicate_ignored",
+            "message": "Event already exists in queue.",
+        }
+
+    if not PROCESS_INLINE_ON_FEEDBACK:
+        return {
+            "status": "recorded",
+            "event_id": event_id,
+            "queue_status": "pending",
+            "message": "Submission captured in queue.",
+        }
 
     # Try inline processing first for low latency; queue ensures durability on failure.
     try:
@@ -262,6 +289,18 @@ def submit_feedback(payload: FeedbackSubmission) -> dict:
             "queue_status": "retry_scheduled",
             "message": "Submission captured in queue and will be retried.",
         }
+
+
+@app.post("/ingest/form-response")
+def ingest_form_response(payload: IngestRequest) -> dict:
+    now = now_iso()
+    event_payload = payload.model_dump(exclude={"event_id"})
+    event_id, created = store.enqueue_event(event_payload, now, payload.event_id)
+    return {
+        "status": "accepted",
+        "event_id": event_id,
+        "queue_status": "pending" if created else "duplicate_ignored",
+    }
 
 
 @app.post("/queue/process")

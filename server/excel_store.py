@@ -140,14 +140,20 @@ class ExcelFeedbackStore:
         if self._normalize_headers(existing) != self._normalize_headers(self.QUEUE_HEADER):
             raise ValueError("Queue sheet header mismatch")
 
-    def enqueue_event(self, payload: dict, created_at: str) -> str:
-        event_id = str(uuid.uuid4())
+    def enqueue_event(self, payload: dict, created_at: str, event_id: str | None = None) -> tuple[str, bool]:
+        event_id = (event_id or str(uuid.uuid4())).strip()
+        if not event_id:
+            event_id = str(uuid.uuid4())
         with self._lock:
             wb = load_workbook(self.path)
             ws = wb[self.QUEUE_SHEET]
+            for row_idx in range(2, ws.max_row + 1):
+                row_event = str(ws.cell(row=row_idx, column=1).value or "").strip()
+                if row_event == event_id:
+                    return event_id, False
             ws.append([event_id, "pending", 0, "", created_at, created_at, "", json.dumps(payload)])
             wb.save(self.path)
-        return event_id
+        return event_id, True
 
     def claim_due_events(self, now_iso_value: str, limit: int = 20) -> List[dict]:
         claimed: List[dict] = []

@@ -4,11 +4,13 @@ services:
     env: python
     rootDir: server
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: python -m pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
       - key: STORAGE_BACKEND
         value: google_sheets
       - key: HR_SUMMARY_SHEET

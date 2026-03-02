@@ -71,6 +71,7 @@ See `excel_mapping.md` for exact columns and payload mapping.
 - Every submission is captured in `ingestion_queue` before processing.
 - If inline processing fails, event is marked `retry` and can be retried via `/queue/process`.
 - This reduces the risk of dropped submissions during transient failures.
+- Default in current setup: `PROCESS_INLINE_ON_FEEDBACK=false` (detached processing).
 
 ### Queue endpoint
 - `POST /queue/process`
@@ -80,6 +81,58 @@ See `excel_mapping.md` for exact columns and payload mapping.
   "max_attempts": 10
 }
 ```
+
+### Detached ingestion endpoint
+- `POST /ingest/form-response`
+- Accepts the same payload as `/feedback` plus optional `event_id` for idempotency.
+
+### Apps Script bridge
+- Template file: [apps_script_ingest.gs](./scripts/apps_script_ingest.gs)
+- Use `onFormSubmit` trigger to enqueue events.
+- Use time-driven `processQueue` trigger for retries/background processing.
+
+### Apps Script field mapping
+In `apps_script_ingest.gs`, update these question-title keys to match your Form exactly:
+
+| Script key lookup | Expected Form question title |
+|---|---|
+| `named["Employee Email"]` | `Employee Email` |
+| `named["Employee Name"]` | `Employee Name` |
+| `named["Manager Email"]` | `Manager Email` |
+| `named["Client Email"]` | `Client Email` |
+| `named["Peer 1"]` | `Peer 1` |
+| `named["Peer 2"]` | `Peer 2` |
+| `named["Quarter"]` | `Quarter` |
+| `named["Year"]` | `Year` |
+| `named["Form Type"]` | `Form Type` (`self/manager/client/peer`) |
+| `named["Answers"]` | `Answers` (comma/space separated numbers) |
+| `named["Comments"]` | `Comments` (optional, use `|` separator for multiple) |
+
+If your question titles differ, only change the keys inside `named["..."]`.
+
+### Bind Apps Script to response sheet
+1. Open the Google Form response spreadsheet.
+2. Click `Extensions` -> `Apps Script`.
+3. Delete default code in `Code.gs`.
+4. Paste contents of `scripts/apps_script_ingest.gs`.
+5. Set constants at top:
+   - `API_BASE_URL`
+   - `API_KEY` (optional, keep empty for now if no auth)
+6. Click `Save`.
+7. In Apps Script, open `Triggers` (clock icon) and add:
+   - Trigger 1:
+     - Function: `onFormSubmit`
+     - Event source: `From spreadsheet`
+     - Event type: `On form submit`
+   - Trigger 2:
+     - Function: `processQueue`
+     - Event source: `Time-driven`
+     - Frequency: every 5 minutes
+8. Authorize requested permissions.
+9. Submit one form response and verify:
+   - API `/queue/stats` pending/processed counts
+   - `ingestion_queue` row added
+   - `feedback` + `Sheet1` updates after worker runs
 
 ### Quick start for weekend testing (no GCP billing needed)
 - Set `STORAGE_BACKEND=local_excel`

@@ -165,14 +165,20 @@ class GoogleSheetsFeedbackStore:
                 value_input_option="RAW",
             )
 
-    def enqueue_event(self, payload: dict, created_at: str) -> str:
-        event_id = str(uuid.uuid4())
+    def enqueue_event(self, payload: dict, created_at: str, event_id: str | None = None) -> tuple[str, bool]:
+        event_id = (event_id or str(uuid.uuid4())).strip()
+        if not event_id:
+            event_id = str(uuid.uuid4())
         with self._lock:
+            rows = self._queue_ws.get_all_values()
+            for row in rows[1:]:
+                if row and row[0].strip() == event_id:
+                    return event_id, False
             self._queue_ws.append_row(
                 [event_id, "pending", "0", "", created_at, created_at, "", json.dumps(payload)],
                 value_input_option="RAW",
             )
-        return event_id
+        return event_id, True
 
     def claim_due_events(self, now_iso_value: str, limit: int = 20) -> List[dict]:
         claimed: List[dict] = []
