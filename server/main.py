@@ -119,10 +119,6 @@ class QueueProcessRequest(BaseModel):
     max_attempts: int = Field(default=10, ge=1, le=50)
 
 
-class IngestRequest(FeedbackSubmission):
-    event_id: str | None = None
-
-
 def _difference_fields(averages: Dict[str, float]) -> Dict[str, float | str]:
     self_avg = averages.get("self")
     client_avg = averages.get("client")
@@ -195,6 +191,8 @@ def health_check() -> dict:
 
 
 def _process_feedback_payload(payload: FeedbackSubmission) -> dict:
+    # Business processing path: write normalized submission, compute quarter summary,
+    # and mirror summary values to HR-facing sheet.
     employee_key = _normalize_employee_key(payload.employee_id, payload.employee_email)
     key = submission_key(payload.year, payload.quarter)
     record = SubmissionRecord(
@@ -251,6 +249,8 @@ def _process_feedback_payload(payload: FeedbackSubmission) -> dict:
 
 @app.post("/feedback")
 def submit_feedback(payload: FeedbackSubmission) -> dict:
+    # API ingestion path. Always capture event in durable queue first.
+    # Processing can happen inline (optional) or via /queue/process worker.
     now = now_iso()
     event_payload = payload.model_dump()
     event_id, created = store.enqueue_event(event_payload, now)
@@ -291,20 +291,9 @@ def submit_feedback(payload: FeedbackSubmission) -> dict:
         }
 
 
-@app.post("/ingest/form-response")
-def ingest_form_response(payload: IngestRequest) -> dict:
-    now = now_iso()
-    event_payload = payload.model_dump(exclude={"event_id"})
-    event_id, created = store.enqueue_event(event_payload, now, payload.event_id)
-    return {
-        "status": "accepted",
-        "event_id": event_id,
-        "queue_status": "pending" if created else "duplicate_ignored",
-    }
-
-
 @app.post("/queue/process")
 def process_queue(payload: QueueProcessRequest) -> dict:
+    # Worker path. Claims due queue events and processes them with retry/fail handling.
     now = now_iso()
     events = store.claim_due_events(now, payload.limit)
     processed = 0
