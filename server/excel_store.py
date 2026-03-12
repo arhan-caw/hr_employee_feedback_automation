@@ -290,6 +290,56 @@ class ExcelFeedbackStore:
                 rows.append(self._row_to_record(row))
         return rows
 
+    def list_submission_status(self, year: int, quarter: str) -> List[dict]:
+        by_employee: dict[str, dict] = {}
+        with self._lock:
+            wb = load_workbook(self.path, read_only=True)
+            ws = wb[self.FEEDBACK_SHEET]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not row or len(row) < 22:
+                    continue
+                record_type = str(row[0] or "").strip()
+                row_emp = str(row[1] or "").strip()
+                if not row_emp:
+                    continue
+                row_name = str(row[2] or "").strip() or row_emp
+                row_year = str(row[3] or "").strip()
+                row_quarter = str(row[4] or "").strip()
+                if row_year != str(year) or row_quarter != quarter:
+                    continue
+
+                item = by_employee.setdefault(
+                    row_emp,
+                    {
+                        "employee_email": row_emp,
+                        "employee_name": row_name,
+                        "submitted_forms": set(),
+                        "manager_email": "",
+                        "client_email": "",
+                    },
+                )
+
+                if record_type == "submission":
+                    form_type = str(row[5] or "").strip()
+                    if form_type:
+                        item["submitted_forms"].add(form_type)
+                elif record_type == "summary":
+                    item["manager_email"] = str(row[9] or "").strip()
+                    item["client_email"] = str(row[10] or "").strip()
+
+        results: List[dict] = []
+        for _, item in by_employee.items():
+            results.append(
+                {
+                    "employee_email": item["employee_email"],
+                    "employee_name": item["employee_name"],
+                    "submitted_forms": sorted(item["submitted_forms"]),
+                    "manager_email": item["manager_email"],
+                    "client_email": item["client_email"],
+                }
+            )
+        return results
+
     def _row_to_record(self, row) -> SubmissionRecord:
         try:
             answers = [float(v) for v in json.loads(row[6] or "[]")]

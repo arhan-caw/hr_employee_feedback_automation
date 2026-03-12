@@ -45,7 +45,7 @@ function onFormSubmit(e) {
       comments: comments
     };
 
-    postJson(API_BASE_URL + "/ingest/form-response", payload);
+    postJson(API_BASE_URL + "/feedback", payload);
   } catch (err) {
     // Keep visible in Apps Script logs for debugging.
     Logger.log("onFormSubmit error: " + err);
