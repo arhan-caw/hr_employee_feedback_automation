@@ -119,6 +119,20 @@ class QueueProcessRequest(BaseModel):
     max_attempts: int = Field(default=10, ge=1, le=50)
 
 
+class ReminderCandidatesRequest(BaseModel):
+    year: int = Field(..., ge=2000, le=2100)
+    quarter: Literal["Q1", "Q2", "Q3", "Q4"]
+    required_forms: List[FormType] = Field(default_factory=lambda: ["self"])
+    include_completed: bool = False
+
+    @model_validator(mode="after")
+    def validate_required_forms(self) -> "ReminderCandidatesRequest":
+        if not self.required_forms:
+            raise ValueError("required_forms must include at least one form type")
+        self.required_forms = sorted(set(self.required_forms))
+        return self
+
+
 def _difference_fields(averages: Dict[str, float]) -> Dict[str, float | str]:
     self_avg = averages.get("self")
     client_avg = averages.get("client")
@@ -334,6 +348,47 @@ def queue_stats() -> dict:
     if not hasattr(store, "get_queue_stats"):
         raise HTTPException(status_code=501, detail="Queue stats not supported by current storage backend")
     return store.get_queue_stats()
+
+
+@app.post("/reminders/candidates")
+def reminder_candidates(payload: ReminderCandidatesRequest) -> dict:
+    # Finds employee records for a quarter and computes which required forms are still missing.
+    if not hasattr(store, "list_submission_status"):
+        raise HTTPException(status_code=501, detail="Reminder candidates not supported by current storage backend")
+
+    rows = store.list_submission_status(payload.year, payload.quarter)
+    required = set(payload.required_forms)
+    candidates: List[dict] = []
+    completed = 0
+
+    for row in rows:
+        submitted = set(row.get("submitted_forms", []))
+        missing_forms = sorted(required - submitted)
+        if not missing_forms:
+            completed += 1
+            if not payload.include_completed:
+                continue
+        candidates.append(
+            {
+                "employee_email": row.get("employee_email", ""),
+                "employee_name": row.get("employee_name", ""),
+                "manager_email": row.get("manager_email", ""),
+                "client_email": row.get("client_email", ""),
+                "submitted_forms": sorted(submitted),
+                "missing_forms": missing_forms,
+            }
+        )
+
+    return {
+        "year": payload.year,
+        "quarter": payload.quarter,
+        "required_forms": sorted(required),
+        "total_employees_seen": len(rows),
+        "completed_count": completed,
+        "pending_count": sum(1 for c in candidates if c["missing_forms"]),
+        "candidates": candidates,
+        "note": "This is based on employees already present in feedback sheet data for the selected quarter.",
+    }
 
 
 @app.get("/employees/{employee_id}/quarters/{year}/{quarter}", response_model=QuarterSummary)

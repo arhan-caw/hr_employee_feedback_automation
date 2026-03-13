@@ -82,14 +82,35 @@ See `excel_mapping.md` for exact columns and payload mapping.
 }
 ```
 
-### Detached ingestion endpoint
-- `POST /ingest/form-response`
-- Accepts the same payload as `/feedback` plus optional `event_id` for idempotency.
+### Ingestion endpoint
+- `POST /feedback`
+- Accepts feedback payload and stores it in queue first.
 
 ### Apps Script bridge
 - Template file: [apps_script_ingest.gs](./scripts/apps_script_ingest.gs)
-- Use `onFormSubmit` trigger to enqueue events.
+- Use `onFormSubmit` trigger to call `/feedback`.
 - Use time-driven `processQueue` trigger for retries/background processing.
+
+## Reminder Emails (Gmail + Apps Script)
+- Backend endpoint for candidates:
+  - `POST /reminders/candidates`
+- Apps Script template:
+  - [apps_script_reminders.gs](./scripts/apps_script_reminders.gs)
+
+Example request:
+```json
+{
+  "year": 2026,
+  "quarter": "Q1",
+  "required_forms": ["self"],
+  "include_completed": false
+}
+```
+
+Notes:
+- Phase 1 reminder flow uses Gmail from Apps Script (`GmailApp.sendEmail`).
+- Candidate list is computed from employees already present in `feedback` data for the selected quarter.
+- Add a time-driven trigger for `sendPendingReminders` (for example, daily morning) or run it manually.
 
 ### Apps Script field mapping
 In `apps_script_ingest.gs`, update these question-title keys to match your Form exactly:
