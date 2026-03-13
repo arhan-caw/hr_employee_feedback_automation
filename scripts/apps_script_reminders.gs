@@ -13,20 +13,20 @@
  * - Create trigger for sendPendingReminders (time-driven or manual).
  */
 
-const API_BASE_URL = "https://YOUR_RENDER_URL";
-const API_KEY = "";
-const TARGET_YEAR = 2026;
-const TARGET_QUARTER = "Q1";
-const REQUIRED_FORMS = ["self"]; // ex: ["self","manager","client","peer"]
+const REMINDER_API_BASE_URL = "https://YOUR_RENDER_URL";
+const REMINDER_API_KEY = "";
+const REMINDER_TARGET_YEAR = 2026;
+const REMINDER_TARGET_QUARTER = "Q1";
+const REMINDER_REQUIRED_FORMS = ["self"]; // ex: ["self","manager","client","peer"]
 
 function sendPendingReminders() {
   const payload = {
-    year: TARGET_YEAR,
-    quarter: TARGET_QUARTER,
-    required_forms: REQUIRED_FORMS,
+    year: REMINDER_TARGET_YEAR,
+    quarter: REMINDER_TARGET_QUARTER,
+    required_forms: REMINDER_REQUIRED_FORMS,
     include_completed: false
   };
-  const data = postJson(API_BASE_URL + "/reminders/candidates", payload);
+  const data = reminderPostJson_(REMINDER_API_BASE_URL + "/reminders/candidates", payload);
   const candidates = (data && data.candidates) || [];
 
   const logSheet = getOrCreateReminderLogSheet_();
@@ -47,18 +47,18 @@ function sendPendingReminders() {
       continue;
     }
 
-    const fingerprint = [TARGET_YEAR, TARGET_QUARTER, toEmail.toLowerCase(), missingForms.join(",")].join("|");
+    const fingerprint = [REMINDER_TARGET_YEAR, REMINDER_TARGET_QUARTER, toEmail.toLowerCase(), missingForms.join(",")].join("|");
     if (wasReminderSentToday_(logSheet, fingerprint)) {
       skipped++;
       continue;
     }
 
     const name = row.employee_name || "Team Member";
-    const subject = "[Reminder] Pending feedback forms - " + TARGET_QUARTER + " " + TARGET_YEAR;
+    const subject = "[Reminder] Pending feedback forms - " + REMINDER_TARGET_QUARTER + " " + REMINDER_TARGET_YEAR;
     const body =
       "Hi " + name + ",\n\n" +
       "This is a reminder that the following feedback form(s) are still pending for " +
-      TARGET_QUARTER + " " + TARGET_YEAR + ":\n" +
+      REMINDER_TARGET_QUARTER + " " + REMINDER_TARGET_YEAR + ":\n" +
       "- " + missingForms.join("\n- ") + "\n\n" +
       "Please complete them as soon as possible.\n\n" +
       "Thanks,\nHR Team";
@@ -66,8 +66,8 @@ function sendPendingReminders() {
     GmailApp.sendEmail(toEmail, subject, body);
     logSheet.appendRow([
       new Date().toISOString(),
-      TARGET_YEAR,
-      TARGET_QUARTER,
+      REMINDER_TARGET_YEAR,
+      REMINDER_TARGET_QUARTER,
       toEmail,
       name,
       missingForms.join(","),
@@ -80,9 +80,9 @@ function sendPendingReminders() {
   Logger.log("Reminder run completed. sent=" + sent + " skipped=" + skipped + " candidates=" + candidates.length);
 }
 
-function postJson(url, payload) {
+function reminderPostJson_(url, payload) {
   const headers = { "Content-Type": "application/json" };
-  if (API_KEY) headers["x-api-key"] = API_KEY;
+  if (REMINDER_API_KEY) headers["x-api-key"] = REMINDER_API_KEY;
 
   const res = UrlFetchApp.fetch(url, {
     method: "post",
